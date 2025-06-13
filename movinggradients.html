@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <title>3-Peak Run-and-Tumble</title>
+  <style>
+    body { font-family: "HelveticaNeue-Light", "Helvetica Neue Light", "Helvetica Neue",
+         Helvetica, Arial, "Lucida Grande", sans-serif; padding : 15px; max-width: 800px; margin: auto;; }
+    canvas { display: block; margin: 10px auto; border: 1px solid #aaa; }
+  </style>
+  <script src="./artistoo.js"></script>
+</head>
+
+<body onload="initialize()">
+  <h2>CPM with a run and tumble strategy</h2>
+
+  <script>
+  
+  let trackedPositions = [];
+
+  "use strict";
+
+  const config = {
+    ndim: 2,
+    field_size: [400,400],      
+    conf: {
+      
+      torus: [false,false],
+      seed: 1,
+      T: 20,
+      J: [[0,10],[10,20]],
+      LAMBDA_V: [0,20],
+      V: [0,100],
+      LAMBDA_CH: [0,5000],
+      LAMBDA_ACT : [0,200],				
+		  MAX_ACT : [0,80],		
+      LAMBDA_P: [0,2],						
+		  P : [0,180],		
+		  ACT_MEAN : "geometric"		
+    },
+    simsettings: {
+      NRCELLS: [100],            
+      zoom: 2,                 
+      BURNIN: 0,
+      RUNTIME_BROWSER: "Inf",
+      SHOWBORDERS: [true, true],       
+      ACTCOLOR: [true], 
+      CELLCOLOR: ["000000","FF0000"],
+      PEAK_COLOR: "Add8e6"
+    }
+  };
+
+  let sim;
+
+  let peaks = [];
+  const numPeaks = 5; 
+  const gridSize = 40; 
+
+  for (let i = 0; i < numPeaks; i++) {
+    peaks.push({
+      x: Math.random() * gridSize,
+      y: Math.random() * gridSize,
+      amp: 1000 + Math.random() * 1000, 
+      sigma: 1 + Math.random() * 3,     
+      dx: (Math.random() - 0.5) * 2,  
+      dy: (Math.random() - 0.5) * 2,
+      speed: 0.05 + Math.random() * 0.1, 
+      stopProb: 0.01 + Math.random() * 0.04 
+    });
+  }
+
+  function initialize() {    
+    sim = new CPM.Simulation(config, {
+      initializeGrid,
+      postMCSListener,
+      drawCanvas
+    });
+
+    sim.g = new CPM.Grid2D([40,40], config.conf.torus, "Float32");
+    sim.gi = new CPM.CoarseGrid(sim.g, 10);
+    
+    sim.C.add(new CPM.ChemotaxisConstraint({
+      LAMBDA_CH: config.conf.LAMBDA_CH,
+      CH_FIELD: sim.gi
+    }));
+
+    sim.cellData = new Map();
+    updateChemoField();
+    requestAnimationFrame(step);
+  }
+
+  function updateChemoField() {
+    sim.g.setpix([0,0], 0);
+    
+    for (const p of peaks) {
+      if (Math.random() < 0.02) {
+        p.dx = (Math.random() - 0.5) * 2;
+        p.dy = (Math.random() - 0.5) * 2;
+      }
+
+      if (Math.random() < p.stopProb) {
+        p.dx = 0;
+        p.dy = 0;
+      }
+
+      for (const p2 of peaks) {
+        if (p !== p2) {
+          const dist = Math.sqrt((p.x - p2.x) ** 2 + (p.y - p2.y) ** 2);
+          if (dist < 10) {
+            p.dx += (p.x - p2.x) / dist * 0.1;
+            p.dy += (p.y - p2.y) / dist * 0.1;
+          }
+        }
+      }
+
+      let newX = p.x + p.speed * p.dx;
+      let newY = p.y + p.speed * p.dy;
+      if (newX < 0) {
+        newX = 0;
+        p.dx *= -1;
+      } else if (newX >= sim.g.extents[0]) {
+        newX = sim.g.extents[0] - 0.1;
+        p.dx *= -1;
+      }
+      
+      if (newY < 0) {
+        newY = 0;
+        p.dy *= -1;
+      } else if (newY >= sim.g.extents[1]) {
+        newY = sim.g.extents[1] - 0.1;
+        p.dy *= -1;
+      }
+      
+      p.x = newX;
+      p.y = newY;
+    }
+
+    for (let i = 0; i < sim.g.extents[0]; i++) {
+      for (let j = 0; j < sim.g.extents[1]; j++) {
+        let val = 0;
+        for (const p of peaks) {
+          const dx = i - p.x, dy = j - p.y;
+          val += p.amp * Math.exp(-(dx*dx + dy*dy)/(2*p.sigma*p.sigma));
+        }
+        sim.g.setpix([i,j], val);
+      }
+    }
+  }
+
+  function initializeGrid() {
+    if (!this.helpClasses.gm) this.addGridManipulator();
+    for (let n = 0; n < 300; n++) {
+      const x = Math.floor(Math.random() * this.C.extents[0]);
+      const y = Math.floor(Math.random() * this.C.extents[1]);
+      this.gm.seedCellAt(1, [x, y]);
+    }
+  }
+
+  function step() {
+    sim.step();
+    requestAnimationFrame(step);
+  }
+
+function postMCSListener() {
+  updateChemoField();
+    if (this.time % 10 === 0) {
+    let cellPixels = {};
+    for (let x = 0; x < this.C.extents[0]; x++) {
+      for (let y = 0; y < this.C.extents[1]; y++) {
+        let cid = this.C.pixt([x, y]);
+        if (cid > 0) {
+          if (!cellPixels[cid]) cellPixels[cid] = [];
+          cellPixels[cid].push([x, y]);
+        }
+      }
+    }
+
+    let cellsCount = 0;
+
+    for (let cid in cellPixels) {
+      let pixels = cellPixels[cid];
+      let cx = 0, cy = 0;
+      for (let p of pixels) {
+        cx += p[0];
+        cy += p[1];
+      }
+      cx /= pixels.length;
+      cy /= pixels.length;
+
+      const coarseX = Math.floor(cx / 10);
+      const coarseY = Math.floor(cy / 10);
+      const chemo = (coarseX >= 0 && coarseX < this.gi.extents[0] && coarseY >= 0 && coarseY < this.gi.extents[1])
+        ? this.gi.pixt([coarseX, coarseY]) : 0;
+
+      for (let i = 0; i < peaks.length; i++) {
+        let pk = peaks[i];
+        trackedPositions.push({
+          time: this.time,
+          cid: cid,
+          cx: cx,
+          cy: cy,
+          chemo: chemo,
+          peakid: i,
+          peakx: pk.x,
+          peaky: pk.y
+        });
+      }
+
+      cellsCount++;
+    }
+
+  }
+
+  if (this.time === 500) {
+    exportToCSV(trackedPositions);
+  }
+  let ids = [];
+
+  if (Array.isArray(this.C.cellIDs)) ids = this.C.cellIDs;
+  else if (this.C.cells instanceof Set) ids = Array.from(this.C.cells);
+  else if (this.C.cells && typeof this.C.cells === "object")
+    ids = Object.keys(this.C.cells).map(Number);
+
+  for (const id of ids) {
+    if (id === 0) continue;
+
+    const pos = this.C.grid.getCentroid(id);
+    const intPos = pos.map(Math.floor);
+
+    const gridWidth = this.gi.width || this.gi.size[0];
+    const gridHeight = this.gi.height || this.gi.size[1];
+
+    let chemo;
+    if (intPos[0] < 0 || intPos[0] >= gridWidth || intPos[1] < 0 || intPos[1] >= gridHeight) {
+      chemo = 0;
+    } else {
+      chemo = this.gi.pixt(intPos);
+    }
+
+    let data = this.cellData.get(id);
+    if (!data) {
+      data = {
+        prevChemo: chemo,
+        tumbleTimer: 0,
+        tumbleSensitivity: Math.random() * 0.1 + 0.9,
+        tumbleDuration: Math.floor(Math.random() * 10) + 5,
+        baselineT: 10,
+        tumbleT: 100,
+        fitness: 0
+      };
+    }
+
+    if (chemo < data.prevChemo * data.tumbleSensitivity) {
+      data.tumbleTimer = data.tumbleDuration;
+    } else if (data.tumbleTimer > 0) {
+      data.tumbleTimer--;
+    }
+
+    this.C.conf.T = data.tumbleTimer > 0 ? data.tumbleT : data.baselineT;
+    data.prevChemo = chemo;
+    data.fitness += chemo;
+    this.cellData.set(id, data);
+  }
+}
+
+ function drawCanvas() {
+  if (!this.helpClasses.canvas) this.addCanvas();
+  this.Cim.drawField(this.gi);
+
+  let allFitness = Array.from(sim.cellData.values()).map(d => d.fitness);
+  let topThreshold = allFitness.length > 0 ? 
+    allFitness.sort((a, b) => b - a)[Math.floor(allFitness.length * 0.1)] : 0;
+
+  for (let [id, data] of sim.cellData.entries()) {
+    if (id === 0) continue;
+    const color = data.fitness >= topThreshold ? "00FF00" : "000000";
+    this.Cim.drawCell(id, color);
+  }
+  
+
+  this.Cim.drawCellBorders(-1, "000000");
+
+  // Draw peaks
+  const ctx = this.Cim.ctx;
+  ctx.fillStyle = "#" + config.simsettings.PEAK_COLOR;
+  for (const p of peaks) {
+    const screenX = p.x * 10 * config.simsettings.zoom;
+    const screenY = p.y * 10 * config.simsettings.zoom;
+    ctx.beginPath();
+    ctx.arc(screenX, screenY, 5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function exportToCSV(data) {
+  let csv = "time,cell,cx,cy,peak_id,peak_x,peak_y\n";
+  data.forEach(entry => {
+    csv += `${entry.time},${entry.cid},${entry.cx.toFixed(2)},${entry.cy.toFixed(2)},${entry.peakid},${entry.peakx.toFixed(2)},${entry.peaky.toFixed(2)}\n`;
+  });
+
+  const blob = new Blob([csv], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "moving1.csv";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+
+  </script>
+</body>
+</html>

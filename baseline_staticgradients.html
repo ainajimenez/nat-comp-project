@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>3-Peak Run-and-Tumble (Tight Spots)</title>
+  <style>
+    body { font-family: sans-serif; padding: 15px; max-width: 700px; margin: auto; }
+    canvas { display: block; margin: 10px auto; border: 1px solid #aaa; }
+  </style>
+  <script src="./artistoo.js"></script>
+</head>
+<body onload="initialize()">
+  <h2>Run-and-Tumble on 3 Tight Peaks</h2>
+  <p>10 cells randomly seeded; peaks have σ=2–3, borders turned on.</p>
+
+  <script>
+  "use strict";
+
+  const config = {
+    ndim: 2,
+    field_size: [400,400],      
+    conf: {
+      torus: [false,false],
+      seed: 1,
+      T: 20,
+      J: [[0,10],[10,20]],
+      LAMBDA_V: [0,50],
+      V: [0,100],
+      LAMBDA_CH: [0,5000],
+      LAMBDA_ACT : [0,200],			
+		  MAX_ACT : [0,80],	
+      LAMBDA_P: [0,2],					
+		  P : [0,180],						
+		  ACT_MEAN : "geometric"	
+    },
+    simsettings: {
+      NRCELLS: [300],            
+      zoom: 2,                
+      BURNIN: 0,
+      RUNTIME_BROWSER: "Inf",
+      SHOWBORDERS: true,        
+      CELLCOLOR: ["000000","FF0000"],
+      PEAK_COLOR: "Add8e6"
+    }
+  };
+
+    let peaks = [];
+      const numPeaks = 5; 
+      const gridSize = 40; 
+
+      for (let i = 0; i < numPeaks; i++) {
+        peaks.push({
+          x: Math.random() * gridSize,
+          y: Math.random() * gridSize,
+          amp: 1000 + Math.random() * 1000, 
+          sigma: 1 + Math.random() * 3,    
+          dx: (Math.random() - 0.5) * 2,   
+          dy: (Math.random() - 0.5) * 2,
+          speed: 0.05 + Math.random() * 0.1, 
+          stopProb: 0.01 + Math.random() * 0.04 
+        });
+      }
+
+
+  let sim;
+
+  function initialize() {
+    sim = new CPM.Simulation(config, {
+      initializeGrid,
+      postMCSListener,
+      drawCanvas
+    });
+
+    sim.g  = new CPM.Grid2D([40,40], config.conf.torus, "Float32");
+    sim.gi = new CPM.CoarseGrid(sim.g, 10);
+
+    for (let i = 0; i < sim.g.extents[0]; i++) {
+      for (let j = 0; j < sim.g.extents[1]; j++) {
+        let val = 0;
+        for (const p of peaks) {
+          const dx = i - p.x, dy = j - p.y;
+          val += p.amp * Math.exp(- (dx*dx + dy*dy) / (2 * p.sigma * p.sigma));
+        }
+        sim.g.setpix([i,j], val);
+      }
+    }
+
+    sim.C.add(new CPM.ChemotaxisConstraint({
+      LAMBDA_CH: config.conf.LAMBDA_CH,
+      CH_FIELD:  sim.gi
+    }));
+
+    sim.cellData = new Map();
+    requestAnimationFrame(step);
+  }
+
+  function initializeGrid() {
+    if (!this.helpClasses.gm) this.addGridManipulator();
+    for (let n = 0; n < 300; n++) {
+      const x = Math.floor(Math.random() * this.C.extents[0]);
+      const y = Math.floor(Math.random() * this.C.extents[1]);
+      this.gm.seedCellAt(1, [x, y]);
+    }
+  }
+
+  function step() {
+    sim.step();
+    requestAnimationFrame(step);
+  }
+
+let trackedPositions = []
+
+function postMCSListener() {
+  if (this.time % 10 === 0) {
+    let currentEntries = [];
+    let cellPixels = {};
+
+    for (let x = 0; x < this.C.extents[0]; x++) {
+      for (let y = 0; y < this.C.extents[1]; y++) {
+        let cid = this.C.pixt([x, y]);
+        if (cid > 0) {
+          if (!cellPixels[cid]) cellPixels[cid] = [];
+          cellPixels[cid].push([x, y]);
+        }
+      }
+    }
+
+    for (let cid in cellPixels) {
+      let pixels = cellPixels[cid];
+      let cx = 0, cy = 0;
+      for (let p of pixels) {
+        cx += p[0];
+        cy += p[1];
+      }
+      cx /= pixels.length;
+      cy /= pixels.length;
+
+      for (let i = 0; i < peaks.length; i++) {
+        let pk = peaks[i];
+        currentEntries.push({
+          time: this.time,
+          cid: cid,
+          cx: cx,
+          cy: cy,
+          peakid: i,
+          peakx: pk.x,
+          peaky: pk.y
+        });
+      }
+    }
+
+    trackedPositions.push(...currentEntries);
+  }
+
+  if (this.time === 500) {
+    exportToCSV(trackedPositions);
+  }
+
+  let ids = [];
+  if (Array.isArray(this.C.cellIDs)) ids = this.C.cellIDs;
+  else if (this.C.cells instanceof Set) ids = Array.from(this.C.cells);
+  else if (this.C.cells && typeof this.C.cells === "object")
+    ids = Object.keys(this.C.cells).map(Number);
+
+  for (const id of ids) {
+    if (id === 0) continue;
+    const pos = this.C.grid.getCentroid(id);
+    const chemo = this.gi.getpix(pos);
+    let data = this.cellData.get(id);
+    if (!data) data = { prevChemo: chemo, tumbleTimer: 0 };
+
+    if (chemo < data.prevChemo * 0.98) data.tumbleTimer = 10;
+    else if (data.tumbleTimer > 0) data.tumbleTimer--;
+
+    this.C.conf.T = data.tumbleTimer > 0 ? 100 : 10;
+    data.prevChemo = chemo;
+    this.cellData.set(id, data);
+  }
+}
+
+
+
+  function drawCanvas() {
+    if (!this.helpClasses.canvas) this.addCanvas();
+    this.Cim.drawField(this.gi);
+    this.Cim.drawCells();
+    this.Cim.drawCellBorders(-1, "000000");
+    const ctx = this.Cim.ctx;
+    ctx.fillStyle = "#Add8e6";  
+    for (const p of peaks) {
+      const screenX = p.x * 10 * config.simsettings.zoom;
+      const screenY = p.y * 10 * config.simsettings.zoom;
+      ctx.beginPath();
+      ctx.arc(screenX, screenY, 5, 0, Math.PI*2);
+      ctx.fill();
+    }
+
+  }
+
+  function exportToCSV(data) {
+    let csv = "time,cell,cx,cy,peak_id,peak_x,peak_y\n";
+    data.forEach(entry => {
+      csv += `${entry.time},${entry.cid},${entry.cx.toFixed(2)},${entry.cy.toFixed(2)},${entry.peakid},${entry.peakx.toFixed(2)},${entry.peaky.toFixed(2)}\n`;
+    });
+
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "base3.csv";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
+
+
+  </script>
+</body>
+</html>

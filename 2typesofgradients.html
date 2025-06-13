@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Dual‐Nutrient Run‐and‐Tumble</title>
+  <style>
+    body {
+      font-family: "HelveticaNeue-Light", Arial, sans-serif;
+      padding: 0;
+      margin: 0;
+    }
+    #container {
+      position: relative;
+      width: 400px;  
+      height: 400px;
+      border: 1px solid #aaa;
+      overflow: hidden;
+      margin: center ; 
+    }
+    canvas {
+      position: absolute;
+      top: 0; left: 0;
+    }
+    #chemoCanvas, #cellCanvas {
+      width: 400px; 
+      margin: auto;
+    }
+  </style>
+  <script src="./artistoo.js"></script>
+</head>
+<body onload="initialize()">
+  <div id="container">
+    <canvas id="chemoCanvas" width="400" height="400"></canvas>
+    <canvas id="cellCanvas" width="400" height="400"></canvas>
+  </div>
+
+  <script>
+  "use strict";
+
+  const config = {
+    ndim: 2,
+    field_size: [400,400], 
+    conf: {
+      torus: [false,false],
+      seed: 123,
+      T: 20,
+      J: [
+        [  0,  10,  10 ],
+        [ 10,  30,  30 ],
+        [ 10,  30,  30 ]
+      ],
+      LAMBDA_V:   [   0,  20,  20 ],
+      V:          [   0, 200, 100 ],
+      LAMBDA_CH:  [   0,   0,   0 ],
+      LAMBDA_ACT: [   0, 200, 200 ],
+      MAX_ACT:    [   0,  80,  80 ],
+      LAMBDA_P: [0,2, 2],				
+		  P : [0,180,180],
+      ACT_MEAN:   "geometric"
+    },
+    simsettings: {
+      NRCELLS: [50,100],
+      zoom: 1,  
+      BURNIN: 0,
+      RUNTIME_BROWSER: "Inf",
+      SHOWBORDERS: [true,true],
+      ACTCOLOR: [true],
+      CELLCOLOR: ["0000FF","00FF00"],
+      PEAK_COLOR_C: "FF00FF",
+      PEAK_COLOR_N: "FFA500"
+    }
+  };
+
+  let sim, chemoCtx;
+  const chemoGridSize = 40; 
+  const cellSize = 400/chemoGridSize; 
+
+  let peaksC = [
+    { x:10, y: 8, amp:1500, sigma:2,  dx:1,  dy:1,  speed:0.1,  stopProb:0.01 },
+    { x:28, y:12, amp:1200, sigma:1,  dx:-1, dy:0.5,speed:0.05, stopProb:0.02 },
+    { x:20, y:30, amp:1800, sigma:0.5,dx:0.5,dy:-1, speed:0.03, stopProb:0.005 }
+  ];
+  let peaksN = [
+    { x: 5, y: 5, amp:1600, sigma:1.5,dx:1,  dy:-0.3,speed:0.12, stopProb:0.02 },
+    { x:35, y:35,amp:1000, sigma:4,  dx:-0.2,dy:-0.5,speed:0.07, stopProb:0.015 }
+  ];
+
+  function initialize() {
+    chemoCtx = document.getElementById("chemoCanvas").getContext("2d");
+    
+    sim = new CPM.Simulation(config, {
+      initializeGrid,
+      postMCSListener,
+      drawCanvas: ()=>{} 
+    });
+    sim.gC = new CPM.Grid2D([chemoGridSize,chemoGridSize], config.conf.torus, "Float32");
+    sim.gCiC = new CPM.CoarseGrid(sim.gC, 10);
+    sim.gN = new CPM.Grid2D([chemoGridSize,chemoGridSize], config.conf.torus, "Float32");
+    sim.gCiN = new CPM.CoarseGrid(sim.gN, 10);
+    sim.C.add(new CPM.ChemotaxisConstraint({
+      LAMBDA_CH: [0,5000,5000],
+      CH_FIELD:  sim.gCiC
+    }));
+    sim.C.add(new CPM.ChemotaxisConstraint({
+      LAMBDA_CH: [0,   0,5000],
+      CH_FIELD:  sim.gCiN
+    }));
+
+    sim.cellData = new Map();
+    updateChemoFields();
+    
+    sim.addCanvas("cellCanvas", config.simsettings.zoom);
+  
+    sim.Cim.ctx.scale(config.simsettings.zoom, config.simsettings.zoom);
+
+    requestAnimationFrame(step);
+  }
+
+  function initializeGrid() {
+    if (!this.helpClasses.gm) this.addGridManipulator();
+    
+    for (let k=0; k<2; k++) {
+      for (let n=0; n<config.simsettings.NRCELLS[k]; n++){
+        let x = Math.floor(Math.random() * (this.C.extents[0])); 
+        let y = Math.floor(Math.random() * (this.C.extents[1])); 
+        this.gm.seedCellAt(k+1, [x,y]);  
+      }
+    }
+  }
+
+  function updateChemoFields() {
+    sim.gC.setpix([0,0], 0);
+    sim.gN.setpix([0,0], 0);
+
+    function moveAndCompute(peaks, grid) {
+      for (const p of peaks) {
+        if (Math.random()<0.02) {
+          p.dx=(Math.random()-0.5)*2; 
+          p.dy=(Math.random()-0.5)*2;
+        }
+        if (Math.random()<p.stopProb) p.dx=p.dy=0;
+        for (const q of peaks) if (p!==q) {
+          let d=Math.hypot(p.x-q.x,p.y-q.y);
+          if (d<10) { 
+            p.dx+=(p.x-q.x)/d*0.1; 
+            p.dy+=(p.y-q.y)/d*0.1; 
+          }
+        }
+        p.x=(p.x+p.speed*p.dx+grid.extents[0])%grid.extents[0];
+        p.y=(p.y+p.speed*p.dy+grid.extents[1])%grid.extents[1];
+      }
+      for (let i=0;i<grid.extents[0];i++){
+        for (let j=0;j<grid.extents[1];j++){
+          let v=0;
+          for (const p of peaks){
+            let dx=i-p.x,dy=j-p.y;
+            v+=p.amp*Math.exp(-(dx*dx+dy*dy)/(2*p.sigma*p.sigma));
+          }
+          grid.setpix([i,j],v);
+        }
+      }
+    }
+
+    moveAndCompute(peaksC, sim.gC);
+    moveAndCompute(peaksN, sim.gN);
+  }
+
+  function drawChemo() {
+    chemoCtx.clearRect(0,0,400,400);  
+    chemoCtx.globalCompositeOperation = "lighter";
+
+    for (let i=0; i<sim.gC.extents[0]; i++){
+      for (let j=0; j<sim.gC.extents[1]; j++){
+        const v = sim.gC.pixt([i,j]);
+        const alpha = Math.min(1, v/1800) * 0.8;
+        chemoCtx.fillStyle = `rgba(255,0,255,${alpha})`;
+        chemoCtx.fillRect(i*cellSize, j*cellSize, cellSize, cellSize);
+      }
+    }
+
+    for (let i=0; i<sim.gN.extents[0]; i++){
+      for (let j=0; j<sim.gN.extents[1]; j++){
+        const v = sim.gN.pixt([i,j]);
+        const alpha = Math.min(1, v/1600) * 0.8;
+        chemoCtx.fillStyle = `rgba(255,165,0,${alpha})`;
+        chemoCtx.fillRect(i*cellSize, j*cellSize, cellSize, cellSize);
+      }
+    }
+
+    chemoCtx.globalCompositeOperation = "source-over";
+
+    chemoCtx.fillStyle = "#" + config.simsettings.PEAK_COLOR_C;
+    for (const p of peaksC) {
+      chemoCtx.beginPath();
+      chemoCtx.arc(p.x*cellSize, p.y*cellSize, 5, 0, 2*Math.PI);
+      chemoCtx.fill();
+    }
+    
+    chemoCtx.fillStyle = "#" + config.simsettings.PEAK_COLOR_N;
+    for (const p of peaksN) {
+      chemoCtx.beginPath();
+      chemoCtx.arc(p.x*cellSize, p.y*cellSize, 5, 0, 2*Math.PI);
+      chemoCtx.fill();
+    }
+  }
+
+  function postMCSListener() {
+    updateChemoFields();
+    drawChemo();
+
+    sim.Cim.ctx.clearRect(0, 0, 400, 400);
+    sim.Cim.drawCells(1, "28daa1");
+    sim.Cim.drawCells(2, "2891da");
+    sim.Cim.ctx.lineWidth = 0.5;
+    sim.Cim.drawCellBorders(-1, "000000");
+
+    let ids = [];
+    if (Array.isArray(this.C.cellIDs)) ids = this.C.cellIDs;
+    else if (this.C.cells instanceof Set) ids = Array.from(this.C.cells);
+    else if (this.C.cells) ids = Object.keys(this.C.cells).map(Number);
+
+    for (const id of ids) {
+      if (id===0) continue;
+      let pos = this.C.grid.getCentroid(id);
+      let cC = sim.gCiC.getpix([pos[0]/10, pos[1]/10]);
+      let cN = sim.gCiN.getpix([pos[0]/10, pos[1]/10]);
+      let data = this.cellData.get(id) || {pC:cC,pN:cN,t:0};
+      let prevBest = Math.max(data.pC,data.pN);
+      let nowBest = Math.max(cC,cN);
+      if (nowBest < prevBest*0.98) data.t = 10;
+      else if (data.t>0) data.t--;
+      this.C.conf.T = data.t>0 ? 100 : 10;
+      data.pC=cC; data.pN=cN;
+      this.cellData.set(id,data);
+    }
+  }
+
+  function step() {
+    sim.step();
+    requestAnimationFrame(step);
+  }
+  </script>
+</body>
+</html>
